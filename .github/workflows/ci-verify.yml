@@ -1,0 +1,60 @@
+name: CI Verify (jeandle-jdk)
+
+on:
+  push:
+    branches: ["ci/gha-verify"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Clone upstream source
+        run: git clone --depth=1 --branch main https://github.com/jeandle/jeandle-jdk.git source
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libzstd-dev cmake gawk autoconf file unzip zip \
+            libasound2-dev libcups2-dev libfontconfig1-dev libx11-dev libxext-dev libxrender-dev \
+            libxrandr-dev libxtst-dev libxt-dev
+      - name: Build jeandle-llvm
+        run: |
+          git clone --depth=1 https://github.com/jeandle/jeandle-llvm.git jeandle-llvm
+          mkdir -p jeandle-llvm/build
+          cd jeandle-llvm/build
+          cmake -G "Unix Makefiles" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/install_llvm \
+            -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_DYLIB_COMPONENTS=all ../llvm
+          cmake --build . --target install -j 4
+      - name: Configure JDK
+        working-directory: source
+        run: |
+          bash configure \
+            --with-conf-name=linux-x64 \
+            --with-version-opt=ci-verify \
+            --with-boot-jdk=$JAVA_HOME \
+            --with-zlib=system \
+            --with-jmod-compress=zip-1 \
+            --with-jeandle-llvm=$GITHUB_WORKSPACE/install_llvm \
+            --disable-warnings-as-errors || (echo "---- config.log tail ----"; tail -200 config.log; exit 1)
+      - name: Build JDK image
+        working-directory: source
+        run: make images CONF=linux-x64 JOBS=4
+      - name: Smoke test
+        working-directory: source
+        run: ./build/linux-x64/images/jdk/bin/java -version
